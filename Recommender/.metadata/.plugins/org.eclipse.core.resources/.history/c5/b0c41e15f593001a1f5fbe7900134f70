@@ -1,0 +1,132 @@
+package external;
+
+import java.io.BufferedReader;
+
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+
+import org.apache.http.HttpEntity;
+import org.apache.http.client.ClientProtocolException;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import entity.Item;
+import entity.Item.ItemBuilder;
+
+public class GitHubClient {
+	// static final 是常量 值不會變所以是 final (且 命名是蛇行規則)
+	// 每次發請求只有這裡不一樣 可以把 %s 替換成我們要的東西
+	// lat long不用加密 是數字不是字符
+	private static final String URL_TEMPLATE = "https://jobs.github.com/positions.json?description=%s&lat=%s&long=%s";
+	// 用戶不說 description 是甚麼 就默認成 developer 但不是一定要有的 少了也不影響
+	private static final String DEFAULT_KEYWORD = "developer";
+
+	// 給 github 發請求，拿到回應以後再給 servlets
+	public List<Item> search(double lat, double lon, String keyword) {
+		// if user 沒給keyword 我們就給一個默認值
+		if (keyword == null) {
+			keyword = DEFAULT_KEYWORD;
+		}
+		// try catch 避免例外報錯 可以接住異常
+		try {
+			// 為何要 encode? search時若有空格，encode可以處理空格 (換成 +)
+			// UTF-8 是主流 encode 方法 可以處理英文中文等
+			keyword = URLEncoder.encode(keyword, "UTF-8");
+		} catch (UnsupportedEncodingException e) {
+			e.printStackTrace();
+		}
+		String url = String.format(URL_TEMPLATE, keyword, lat, lon);
+		// 給 github API 發送請求
+		CloseableHttpClient httpClient = HttpClients.createDefault();
+		try {
+			// 拿到 response
+			CloseableHttpResponse response = httpClient.execute(new HttpGet(url));
+			// 解析  response，看他是成功的還是失敗的
+			// 也可以判斷是不是 400 500  等等
+			if (response.getStatusLine().getStatusCode() != 200) {
+				return new ArrayList<>();
+			}
+			// 是 200 就繼續操作
+			// entity 包含 content, data 等等
+			HttpEntity entity = response.getEntity();
+			// if entity 沒東西就返回
+			if (entity == null) {
+				return new ArrayList<>();
+			}
+			// 再來解析  entity
+			// entity.getContent() 會拿到一串流數據，所以 InputStreamReader 開始讀取他
+			// InputStreamReader 只能一個一個讀，或是要自己設定，但如果超過就會報錯 ( 1001 = 500 + 500 + 1(error))
+			// 所以再用  BufferedReader 包起來，可以一行一行讀，比較聰明
+			BufferedReader reader = new BufferedReader(new InputStreamReader(entity.getContent()));
+			// build response
+			StringBuilder responseBody = new StringBuilder();
+			// 用  line 去讀每一行
+			String line = null;
+			while ((line = reader.readLine()) != null) {
+				responseBody.append(line);
+			}
+			// 將  responseBody 變成 java object( JSON array ) 再返回
+			JSONArray array = new JSONArray(responseBody.toString());
+			return getItemList(array);
+
+		} catch (ClientProtocolException e) {
+			e.printStackTrace();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		return new ArrayList<>();
+	}
+
+	private List<Item> getItemList(JSONArray array) {
+		List<Item> itemList = new ArrayList<>();
+
+		List<String> descriptionList = new ArrayList<>();
+
+		for (int i = 0; i < array.length(); i++) {
+			// We need to extract keywords from description since GitHub API
+			// doesn't return keywords.
+			String description = getStringFieldOrEmpty(array.getJSONObject(i), "description");
+			if (description.equals("") || description.equals("\n")) {
+				descriptionList.add(getStringFieldOrEmpty(array.getJSONObject(i), "title"));
+			} else {
+				descriptionList.add(description);
+			}
+		}
+
+		// We need to get keywords from multiple text in one request since
+		// MonkeyLearnAPI has limitations on request per minute.
+		List<List<String>> keywords = MonkeyLearnClient.extractKeywords(descriptionList.toArray(new String[descriptionList.size()]));
+
+		for (int i = 0; i < array.length(); ++i) {
+			JSONObject object = array.getJSONObject(i);
+			ItemBuilder builder = new ItemBuilder();
+
+			builder.setItemId(getStringFieldOrEmpty(object, "id"));
+			builder.setName(getStringFieldOrEmpty(object, "title"));
+			builder.setAddress(getStringFieldOrEmpty(object, "location"));
+			builder.setUrl(getStringFieldOrEmpty(object, "url"));
+			builder.setImageUrl(getStringFieldOrEmpty(object, "company_logo"));
+			
+			builder.setKeywords(new HashSet<String>(keywords.get(i)));
+
+			Item item = builder.build();
+			itemList.add(item);
+		}
+
+		return itemList;
+	}
+
+	private String getStringFieldOrEmpty(JSONObject obj, String field) {
+		return obj.isNull(field) ? "" : obj.getString(field);
+	}
+
+}
